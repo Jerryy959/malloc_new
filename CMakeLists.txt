@@ -26,7 +26,9 @@ if (MALLOC_NEW_ENABLE_UBSAN)
     target_link_options(malloc_new PUBLIC -fsanitize=undefined)
 endif()
 
-enable_testing()
+include(CTest)
+
+if (BUILD_TESTING)
 
 add_executable(malloc_new_smoke_tests tests/smoke_tests.cpp)
 target_link_libraries(malloc_new_smoke_tests PRIVATE malloc_new Threads::Threads)
@@ -35,3 +37,4 @@ add_test(NAME smoke COMMAND malloc_new_smoke_tests)
 add_executable(malloc_new_integrity_tests tests/integrity_tests.cpp)
 target_link_libraries(malloc_new_integrity_tests PRIVATE malloc_new Threads::Threads)
 add_test(NAME integrity COMMAND malloc_new_integrity_tests)
+endif()

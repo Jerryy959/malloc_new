@@ -124,9 +124,16 @@ void demo_new_delete_wrapper() {
 ### 3.1 基础功能测试（默认）
 
 ```bash
-cmake -S . -B build
+cmake -S . -B build -DBUILD_TESTING=ON
 cmake --build build -j
-ctest --test-dir build --output-on-failure
+cmake --build build --target test
+# 或者： (cd build && ctest --output-on-failure)
+```
+
+也可以使用仓库脚本（默认 build 目录）：
+
+```bash
+./tools/run_tests.sh
 ```
 
 当前包含两类测试：
@@ -150,7 +157,7 @@ AddressSanitizer：
 ```bash
 cmake -S . -B build-asan -DMALLOC_NEW_ENABLE_ASAN=ON
 cmake --build build-asan -j
-ctest --test-dir build-asan --output-on-failure
+(cd build-asan && ctest --output-on-failure)
 ```
 
 UBSan：
@@ -158,7 +165,7 @@ UBSan：
 ```bash
 cmake -S . -B build-ubsan -DMALLOC_NEW_ENABLE_UBSAN=ON
 cmake --build build-ubsan -j
-ctest --test-dir build-ubsan --output-on-failure
+(cd build-ubsan && ctest --output-on-failure)
 ```
 
 ### 3.4 非 CMake 场景下的基本功能验证
@@ -173,6 +180,32 @@ g++ -O2 -Iinclude examples/no_cmake_basic_demo.cpp ./libmalloc_new.a -lpthread -
 ```
 
 只要输出 `no-cmake basic demo passed` 且进程退出码为 0，即表示在非 CMake 环境下可成功链接并完成基本功能验证。
+
+### 3.5 排查：`No tests were found!!!`
+
+如果你看到了 `No tests were found!!!`，最常见原因是 **ctest 没有在构建目录中执行**（或你的 ctest 版本对 `--test-dir` 支持不一致）。
+
+建议使用最稳妥的方式（优先 `cmake --build build --target test`）：
+
+```bash
+cmake -S . -B build -DBUILD_TESTING=ON
+cmake --build build -j
+cmake --build build --target test
+# 或者：cd build && ctest --output-on-failure
+```
+
+快速自检：
+
+```bash
+# 构建目录下应存在 CTestTestfile.cmake
+ls build/CTestTestfile.cmake
+```
+
+如果该文件存在但依旧无测试，请确认配置阶段没有关闭测试：
+
+```bash
+cmake -S . -B build -DBUILD_TESTING=ON
+```
 
 ### 3.3 完整性测试建议（补充）
 
