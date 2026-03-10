@@ -32,9 +32,11 @@
 ## 构建
 
 ```bash
-cmake -S . -B build -DBUILD_TESTING=ON
+cmake -S . -B build -DBUILD_TESTING=ON -DMALLOC_NEW_BUILD_BENCHMARKS=ON
 cmake --build build -j
 ```
+
+> 如果你仅执行过旧 build 目录上的 `cmake --build build -j`，建议先重新配置一次（上面的 `cmake -S ...`），确保 `malloc_new_latency_bench` 目标被生成。
 
 ## 测试
 
