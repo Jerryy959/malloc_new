@@ -12,6 +12,7 @@ option(MALLOC_NEW_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 
 add_library(malloc_new STATIC
     src/huge_page_allocator.cpp
+    src/compat.cpp
 )
 
 target_include_directories(malloc_new PUBLIC include)
@@ -37,4 +38,16 @@ add_test(NAME smoke COMMAND malloc_new_smoke_tests)
 add_executable(malloc_new_integrity_tests tests/integrity_tests.cpp)
 target_link_libraries(malloc_new_integrity_tests PRIVATE malloc_new Threads::Threads)
 add_test(NAME integrity COMMAND malloc_new_integrity_tests)
+
+add_executable(malloc_new_jemalloc_port_tests tests/jemalloc_port_tests.cpp)
+target_link_libraries(malloc_new_jemalloc_port_tests PRIVATE malloc_new Threads::Threads)
+add_test(NAME jemalloc_port COMMAND malloc_new_jemalloc_port_tests)
+
+add_executable(malloc_new_tcmalloc_port_tests tests/tcmalloc_port_tests.cpp)
+target_link_libraries(malloc_new_tcmalloc_port_tests PRIVATE malloc_new Threads::Threads)
+add_test(NAME tcmalloc_port COMMAND malloc_new_tcmalloc_port_tests)
+
+add_executable(malloc_new_latency_bench tests/latency_bench.cpp)
+target_link_libraries(malloc_new_latency_bench PRIVATE malloc_new Threads::Threads)
+
 endif()

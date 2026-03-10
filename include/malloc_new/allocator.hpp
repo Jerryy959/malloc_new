@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <new>
@@ -13,6 +14,14 @@ void* hp_aligned_alloc(std::size_t alignment, std::size_t size) noexcept;
 void* hp_calloc(std::size_t count, std::size_t size) noexcept;
 void* hp_realloc(void* ptr, std::size_t size) noexcept;
 void hp_free(void* ptr) noexcept;
+
+struct hp_allocator_stats {
+    std::uint64_t hugepage_refill_attempts;
+    std::uint64_t hugepage_refill_success;
+    std::uint64_t fallback_refill_success;
+};
+
+hp_allocator_stats hp_get_allocator_stats() noexcept;
 }
 
 namespace malloc_new {
@@ -21,6 +30,15 @@ template <typename T>
 class HugePageAllocator {
 public:
     using value_type = T;
+    using size_type = std::size_t;
+    using difference_type = std::ptrdiff_t;
+    using propagate_on_container_move_assignment = std::true_type;
+    using is_always_equal = std::true_type;
+
+    template <typename U>
+    struct rebind {
+        using other = HugePageAllocator<U>;
+    };
 
     HugePageAllocator() noexcept = default;
     template <typename U>
@@ -71,3 +89,21 @@ void hp_delete(T* ptr) noexcept {
 }
 
 }  // namespace malloc_new
+
+namespace malloc_new::compat {
+void* malloc(std::size_t size) noexcept;
+void* aligned_alloc(std::size_t alignment, std::size_t size) noexcept;
+void* calloc(std::size_t count, std::size_t size) noexcept;
+void* realloc(void* ptr, std::size_t size) noexcept;
+void free(void* ptr) noexcept;
+
+template <typename T, typename... Args>
+T* new_object(Args&&... args) {
+    return hp_new<T>(std::forward<Args>(args)...);
+}
+
+template <typename T>
+void delete_object(T* ptr) noexcept {
+    hp_delete(ptr);
+}
+}  // namespace malloc_new::compat
