@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(malloc_new LANGUAGES CXX)
 
+find_package(Threads REQUIRED)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -27,9 +29,9 @@ endif()
 enable_testing()
 
 add_executable(malloc_new_smoke_tests tests/smoke_tests.cpp)
-target_link_libraries(malloc_new_smoke_tests PRIVATE malloc_new)
+target_link_libraries(malloc_new_smoke_tests PRIVATE malloc_new Threads::Threads)
 add_test(NAME smoke COMMAND malloc_new_smoke_tests)
 
 add_executable(malloc_new_integrity_tests tests/integrity_tests.cpp)
-target_link_libraries(malloc_new_integrity_tests PRIVATE malloc_new)
+target_link_libraries(malloc_new_integrity_tests PRIVATE malloc_new Threads::Threads)
 add_test(NAME integrity COMMAND malloc_new_integrity_tests)
