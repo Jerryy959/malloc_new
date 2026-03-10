@@ -59,6 +59,10 @@ cmake --build build --target test
 
 输出 `p50/p99`（单位 ns）并同时输出 hugepage 统计。注意微基准对 CPU 频率、绑核、系统负载敏感。
 
+## 详细文档
+
+- 完整 API、实现方式、测试说明与和官方 jemalloc/TCMalloc 测试差异，请见：`docs/API_Implementation_and_Testing.md`。
+
 ## 验证“确实实现了大页分配内存池”建议
 
 1. 运行 `malloc_new_latency_bench` 触发 slab refill。
