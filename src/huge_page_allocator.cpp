@@ -91,7 +91,7 @@ void refill_pool(SizeClassPool& pool) {
     }
 
     std::size_t capacity = kHugePageSize / pool.block_size;
-    auto* base = static_cast<std::byte*>(slab);
+    auto* base = static_cast<unsigned char*>(slab);
     for (std::size_t i = 0; i < capacity; ++i) {
         auto* node = reinterpret_cast<FreeNode*>(base + i * pool.block_size);
         node->next = pool.free_list;
@@ -121,7 +121,7 @@ void* alloc_small(std::size_t size, std::size_t alignment) {
     FreeNode* node = pool.free_list;
     pool.free_list = node->next;
 
-    auto* raw = reinterpret_cast<std::byte*>(node);
+    auto* raw = reinterpret_cast<unsigned char*>(node);
     auto* header = reinterpret_cast<AllocationHeader*>(raw);
     header->magic = kMagic;
     header->class_index = static_cast<std::uint32_t>(idx);
@@ -169,7 +169,7 @@ AllocationHeader* get_header(void* ptr) {
     if (!ptr) {
         return nullptr;
     }
-    auto* header = reinterpret_cast<AllocationHeader*>(reinterpret_cast<std::byte*>(ptr) - sizeof(AllocationHeader));
+    auto* header = reinterpret_cast<AllocationHeader*>(reinterpret_cast<unsigned char*>(ptr) - sizeof(AllocationHeader));
     if (header->magic != kMagic) {
         return nullptr;
     }
@@ -182,7 +182,8 @@ extern "C" void* hp_malloc(std::size_t size) noexcept {
     if (size == 0) {
         size = 1;
     }
-    if (void* p = alloc_small(size, alignof(std::max_align_t)); p) {
+    void* p = alloc_small(size, alignof(std::max_align_t));
+    if (p) {
         return p;
     }
     return alloc_large(size, alignof(std::max_align_t), false);

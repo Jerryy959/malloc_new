@@ -56,6 +56,30 @@ add_subdirectory(path/to/malloc_new)
 target_link_libraries(your_target PRIVATE malloc_new)
 ```
 
+
+### 2.6 非 CMake 环境：手工编译 `libmalloc_new.a` 并调用
+
+如果你的主工程不用 CMake，也可以直接用 `g++/ar` 生成静态库并链接：
+
+```bash
+# 1) 编译 allocator 实现为对象文件
+g++ -O2 -Iinclude -c src/huge_page_allocator.cpp -o huge_page_allocator.o
+
+# 2) 打包为静态库
+ar rcs libmalloc_new.a huge_page_allocator.o
+
+# 3) 编译并链接示例程序（不依赖 CMake）
+g++ -O2 -Iinclude examples/no_cmake_basic_demo.cpp ./libmalloc_new.a -lpthread -o no_cmake_basic_demo
+
+# 4) 运行验证
+./no_cmake_basic_demo
+```
+
+示例程序位于 `examples/no_cmake_basic_demo.cpp`，覆盖了基础 API（`hp_malloc/hp_aligned_alloc/hp_calloc/hp_realloc/hp_free`）、
+STL allocator 用法和 `hp_new/hp_delete`。
+
+> 说明：当前代码避免了 C++17 专属语法；一般情况下直接 `g++ -O2` 即可编译。若你的工具链默认标准过老，可显式加 `-std=c++11` 或更高。
+
 ### 2.3 直接调用 C 接口
 
 ```cpp
@@ -136,6 +160,19 @@ cmake -S . -B build-ubsan -DMALLOC_NEW_ENABLE_UBSAN=ON
 cmake --build build-ubsan -j
 ctest --test-dir build-ubsan --output-on-failure
 ```
+
+### 3.4 非 CMake 场景下的基本功能验证
+
+你可以直接复用上面的手工构建命令，作为“脱离 CMake 的最小验收”：
+
+```bash
+g++ -O2 -Iinclude -c src/huge_page_allocator.cpp -o huge_page_allocator.o
+ar rcs libmalloc_new.a huge_page_allocator.o
+g++ -O2 -Iinclude examples/no_cmake_basic_demo.cpp ./libmalloc_new.a -lpthread -o no_cmake_basic_demo
+./no_cmake_basic_demo
+```
+
+只要输出 `no-cmake basic demo passed` 且进程退出码为 0，即表示在非 CMake 环境下可成功链接并完成基本功能验证。
 
 ### 3.3 完整性测试建议（补充）
 

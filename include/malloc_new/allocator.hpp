@@ -30,7 +30,8 @@ public:
         if (n > (std::numeric_limits<std::size_t>::max() / sizeof(T))) {
             throw std::bad_array_new_length();
         }
-        if (void* p = hp_aligned_alloc(alignof(T), n * sizeof(T)); p != nullptr) {
+        void* p = hp_aligned_alloc(alignof(T), n * sizeof(T));
+        if (p != nullptr) {
             return static_cast<T*>(p);
         }
         throw std::bad_alloc();
