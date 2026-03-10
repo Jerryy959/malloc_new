@@ -63,13 +63,13 @@ target_link_libraries(your_target PRIVATE malloc_new)
 
 ```bash
 # 1) 编译 allocator 实现为对象文件
-g++ -std=c++20 -O2 -Iinclude -c src/huge_page_allocator.cpp -o huge_page_allocator.o
+g++ -O2 -Iinclude -c src/huge_page_allocator.cpp -o huge_page_allocator.o
 
 # 2) 打包为静态库
 ar rcs libmalloc_new.a huge_page_allocator.o
 
 # 3) 编译并链接示例程序（不依赖 CMake）
-g++ -std=c++20 -O2 -Iinclude examples/no_cmake_basic_demo.cpp ./libmalloc_new.a -lpthread -o no_cmake_basic_demo
+g++ -O2 -Iinclude examples/no_cmake_basic_demo.cpp ./libmalloc_new.a -lpthread -o no_cmake_basic_demo
 
 # 4) 运行验证
 ./no_cmake_basic_demo
@@ -77,6 +77,8 @@ g++ -std=c++20 -O2 -Iinclude examples/no_cmake_basic_demo.cpp ./libmalloc_new.a 
 
 示例程序位于 `examples/no_cmake_basic_demo.cpp`，覆盖了基础 API（`hp_malloc/hp_aligned_alloc/hp_calloc/hp_realloc/hp_free`）、
 STL allocator 用法和 `hp_new/hp_delete`。
+
+> 说明：当前代码避免了 C++17 专属语法；一般情况下直接 `g++ -O2` 即可编译。若你的工具链默认标准过老，可显式加 `-std=c++11` 或更高。
 
 ### 2.3 直接调用 C 接口
 
@@ -164,9 +166,9 @@ ctest --test-dir build-ubsan --output-on-failure
 你可以直接复用上面的手工构建命令，作为“脱离 CMake 的最小验收”：
 
 ```bash
-g++ -std=c++20 -O2 -Iinclude -c src/huge_page_allocator.cpp -o huge_page_allocator.o
+g++ -O2 -Iinclude -c src/huge_page_allocator.cpp -o huge_page_allocator.o
 ar rcs libmalloc_new.a huge_page_allocator.o
-g++ -std=c++20 -O2 -Iinclude examples/no_cmake_basic_demo.cpp ./libmalloc_new.a -lpthread -o no_cmake_basic_demo
+g++ -O2 -Iinclude examples/no_cmake_basic_demo.cpp ./libmalloc_new.a -lpthread -o no_cmake_basic_demo
 ./no_cmake_basic_demo
 ```
 
