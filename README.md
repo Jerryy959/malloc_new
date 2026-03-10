@@ -124,9 +124,16 @@ void demo_new_delete_wrapper() {
 ### 3.1 基础功能测试（默认）
 
 ```bash
-cmake -S . -B build
+cmake -S . -B build -DBUILD_TESTING=ON
 cmake --build build -j
-(cd build && ctest --output-on-failure)
+cmake --build build --target test
+# 或者： (cd build && ctest --output-on-failure)
+```
+
+也可以使用仓库脚本（默认 build 目录）：
+
+```bash
+./tools/run_tests.sh
 ```
 
 当前包含两类测试：
@@ -178,13 +185,13 @@ g++ -O2 -Iinclude examples/no_cmake_basic_demo.cpp ./libmalloc_new.a -lpthread -
 
 如果你看到了 `No tests were found!!!`，最常见原因是 **ctest 没有在构建目录中执行**（或你的 ctest 版本对 `--test-dir` 支持不一致）。
 
-建议使用最稳妥的方式：
+建议使用最稳妥的方式（优先 `cmake --build build --target test`）：
 
 ```bash
-cmake -S . -B build
+cmake -S . -B build -DBUILD_TESTING=ON
 cmake --build build -j
-cd build
-ctest --output-on-failure
+cmake --build build --target test
+# 或者：cd build && ctest --output-on-failure
 ```
 
 快速自检：
