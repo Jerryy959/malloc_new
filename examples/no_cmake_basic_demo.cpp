@@ -31,6 +31,12 @@ int main() {
     assert(std::string(r) == "ok");
     hp_free(r);
 
+    void* c = malloc_new::compat::malloc(128);
+    assert(c != nullptr);
+    c = malloc_new::compat::realloc(c, 256);
+    assert(c != nullptr);
+    malloc_new::compat::free(c);
+
     std::vector<int, malloc_new::HugePageAllocator<int>> v;
     for (int i = 0; i < 32; ++i) {
         v.push_back(i);
@@ -40,6 +46,10 @@ int main() {
     auto* s = malloc_new::hp_new<std::string>("malloc_new");
     assert(*s == "malloc_new");
     malloc_new::hp_delete(s);
+
+    auto* t = malloc_new::compat::new_object<std::string>("compat");
+    assert(*t == "compat");
+    malloc_new::compat::delete_object(t);
 
     std::cout << "no-cmake basic demo passed" << std::endl;
     return 0;

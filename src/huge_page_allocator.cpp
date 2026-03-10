@@ -8,6 +8,7 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <atomic>
 #include <new>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -47,6 +48,9 @@ struct SizeClassPool {
 };
 
 std::array<SizeClassPool, kPayloadClasses.size()> g_pools;
+std::atomic<std::uint64_t> g_hugepage_refill_attempts{0};
+std::atomic<std::uint64_t> g_hugepage_refill_success{0};
+std::atomic<std::uint64_t> g_fallback_refill_success{0};
 
 inline std::size_t round_up(std::size_t x, std::size_t align) {
     return (x + (align - 1)) & ~(align - 1);
@@ -70,6 +74,7 @@ void initialize_pool(SizeClassPool& pool, std::size_t class_index) {
 }
 
 void refill_pool(SizeClassPool& pool) {
+    g_hugepage_refill_attempts.fetch_add(1, std::memory_order_relaxed);
     void* slab = mmap(nullptr,
                       kHugePageSize,
                       PROT_READ | PROT_WRITE,
@@ -87,7 +92,10 @@ void refill_pool(SizeClassPool& pool) {
         if (slab == MAP_FAILED) {
             return;
         }
+        g_fallback_refill_success.fetch_add(1, std::memory_order_relaxed);
         madvise(slab, kHugePageSize, MADV_HUGEPAGE);
+    } else {
+        g_hugepage_refill_success.fetch_add(1, std::memory_order_relaxed);
     }
 
     std::size_t capacity = kHugePageSize / pool.block_size;
@@ -271,4 +279,13 @@ extern "C" void* hp_realloc(void* ptr, std::size_t size) noexcept {
     std::memcpy(new_ptr, ptr, old_size);
     hp_free(ptr);
     return new_ptr;
+}
+
+
+extern "C" hp_allocator_stats hp_get_allocator_stats() noexcept {
+    hp_allocator_stats stats{};
+    stats.hugepage_refill_attempts = g_hugepage_refill_attempts.load(std::memory_order_relaxed);
+    stats.hugepage_refill_success = g_hugepage_refill_success.load(std::memory_order_relaxed);
+    stats.fallback_refill_success = g_fallback_refill_success.load(std::memory_order_relaxed);
+    return stats;
 }
