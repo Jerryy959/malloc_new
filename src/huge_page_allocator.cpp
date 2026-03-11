@@ -34,7 +34,12 @@ struct AllocationHeader {
     std::uint32_t flags;
     std::size_t requested_size;
     void* original;
+    std::size_t mapping_size;
+    std::size_t reserved;
 };
+
+static_assert(sizeof(AllocationHeader) % alignof(std::max_align_t) == 0,
+              "AllocationHeader must preserve default alignment");
 
 struct FreeNode {
     FreeNode* next;
@@ -47,10 +52,26 @@ struct SizeClassPool {
     bool initialized{false};
 };
 
+struct ThreadCache {
+    FreeNode* free_list{nullptr};
+    std::size_t count{0};
+};
+
 std::array<SizeClassPool, kPayloadClasses.size()> g_pools;
+thread_local std::array<ThreadCache, kPayloadClasses.size()> g_thread_caches;
 std::atomic<std::uint64_t> g_hugepage_refill_attempts{0};
 std::atomic<std::uint64_t> g_hugepage_refill_success{0};
 std::atomic<std::uint64_t> g_fallback_refill_success{0};
+
+constexpr std::uint32_t kSmallAllocFlag = 1;
+constexpr std::uint32_t kMmapAllocFlag = 2;
+constexpr std::size_t kLocalBatchSize = 64;
+constexpr std::size_t kLocalCacheLimit = 256;
+
+struct RefillResult {
+    FreeNode* head{nullptr};
+    FreeNode* tail{nullptr};
+};
 
 inline std::size_t round_up(std::size_t x, std::size_t align) {
     return (x + (align - 1)) & ~(align - 1);
@@ -73,7 +94,7 @@ void initialize_pool(SizeClassPool& pool, std::size_t class_index) {
     pool.initialized = true;
 }
 
-void refill_pool(SizeClassPool& pool) {
+RefillResult refill_pool(std::size_t block_size) {
     g_hugepage_refill_attempts.fetch_add(1, std::memory_order_relaxed);
     void* slab = mmap(nullptr,
                       kHugePageSize,
@@ -90,7 +111,7 @@ void refill_pool(SizeClassPool& pool) {
                     -1,
                     0);
         if (slab == MAP_FAILED) {
-            return;
+            return {};
         }
         g_fallback_refill_success.fetch_add(1, std::memory_order_relaxed);
         madvise(slab, kHugePageSize, MADV_HUGEPAGE);
@@ -98,13 +119,26 @@ void refill_pool(SizeClassPool& pool) {
         g_hugepage_refill_success.fetch_add(1, std::memory_order_relaxed);
     }
 
-    std::size_t capacity = kHugePageSize / pool.block_size;
+    std::size_t capacity = kHugePageSize / block_size;
     auto* base = static_cast<unsigned char*>(slab);
+    RefillResult result{};
     for (std::size_t i = 0; i < capacity; ++i) {
-        auto* node = reinterpret_cast<FreeNode*>(base + i * pool.block_size);
-        node->next = pool.free_list;
-        pool.free_list = node;
+        auto* node = reinterpret_cast<FreeNode*>(base + i * block_size);
+        node->next = result.head;
+        result.head = node;
+        if (!result.tail) {
+            result.tail = node;
+        }
     }
+    return result;
+}
+
+void push_list(FreeNode*& dst, FreeNode* head, FreeNode* tail) {
+    if (!head) {
+        return;
+    }
+    tail->next = dst;
+    dst = head;
 }
 
 void* alloc_small(std::size_t size, std::size_t alignment) {
@@ -117,27 +151,52 @@ void* alloc_small(std::size_t size, std::size_t alignment) {
     }
 
     auto& pool = g_pools[static_cast<std::size_t>(idx)];
-    std::lock_guard<std::mutex> lock(pool.mu);
-    initialize_pool(pool, static_cast<std::size_t>(idx));
-    if (!pool.free_list) {
-        refill_pool(pool);
-        if (!pool.free_list) {
+    auto& local_cache = g_thread_caches[static_cast<std::size_t>(idx)];
+
+    while (!local_cache.free_list) {
+        {
+            std::lock_guard<std::mutex> lock(pool.mu);
+            initialize_pool(pool, static_cast<std::size_t>(idx));
+
+            for (std::size_t i = 0; i < kLocalBatchSize && pool.free_list; ++i) {
+                FreeNode* node = pool.free_list;
+                pool.free_list = node->next;
+                node->next = local_cache.free_list;
+                local_cache.free_list = node;
+                ++local_cache.count;
+            }
+        }
+
+        if (local_cache.free_list) {
+            break;
+        }
+
+        RefillResult refill = refill_pool(kPayloadClasses[static_cast<std::size_t>(idx)]);
+        if (!refill.head) {
             return nullptr;
         }
+
+        std::lock_guard<std::mutex> lock(pool.mu);
+        push_list(pool.free_list, refill.head, refill.tail);
     }
 
-    FreeNode* node = pool.free_list;
-    pool.free_list = node->next;
+    FreeNode* node = local_cache.free_list;
+    local_cache.free_list = node->next;
+    if (local_cache.count > 0) {
+        --local_cache.count;
+    }
 
     auto* raw = reinterpret_cast<unsigned char*>(node);
     auto* header = reinterpret_cast<AllocationHeader*>(raw);
     header->magic = kMagic;
     header->class_index = static_cast<std::uint32_t>(idx);
-    header->flags = 1;
+    header->flags = kSmallAllocFlag;
     header->requested_size = size;
     header->original = nullptr;
+    header->mapping_size = 0;
+    header->reserved = 0;
 
-    void* payload = raw + round_up(sizeof(AllocationHeader), alignof(std::max_align_t));
+    void* payload = raw + sizeof(AllocationHeader);
     if (alignment > alignof(std::max_align_t)) {
         auto p = reinterpret_cast<std::uintptr_t>(payload);
         p = round_up(p, alignment);
@@ -146,7 +205,7 @@ void* alloc_small(std::size_t size, std::size_t alignment) {
     return payload;
 }
 
-void* alloc_large(std::size_t size, std::size_t alignment, bool zeroed) {
+void* alloc_large_fallback(std::size_t size, std::size_t alignment, bool zeroed) {
     std::size_t extra = sizeof(AllocationHeader) + alignment;
     if (size > (std::numeric_limits<std::size_t>::max() - extra)) {
         return nullptr;
@@ -165,8 +224,58 @@ void* alloc_large(std::size_t size, std::size_t alignment, bool zeroed) {
     header->flags = 0;
     header->requested_size = size;
     header->original = raw;
+    header->mapping_size = 0;
+    header->reserved = 0;
 
     void* payload = reinterpret_cast<void*>(aligned);
+    if (zeroed) {
+        std::memset(payload, 0, size);
+    }
+    return payload;
+}
+
+void* alloc_large(std::size_t size, std::size_t alignment, bool zeroed) {
+    if (alignment > alignof(std::max_align_t)) {
+        return alloc_large_fallback(size, alignment, zeroed);
+    }
+
+    std::size_t payload_offset = sizeof(AllocationHeader);
+    std::size_t requested = payload_offset + size;
+    if (requested < size) {
+        return nullptr;
+    }
+
+    std::size_t map_size = round_up(requested, kHugePageSize);
+    void* raw = mmap(nullptr,
+                     map_size,
+                     PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | MAP_HUGE_2MB,
+                     -1,
+                     0);
+    if (raw == MAP_FAILED) {
+        long page_size = sysconf(_SC_PAGESIZE);
+        if (page_size <= 0) {
+            page_size = 4096;
+        }
+        map_size = round_up(requested, static_cast<std::size_t>(page_size));
+        raw = mmap(nullptr, map_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (raw == MAP_FAILED) {
+            return alloc_large_fallback(size, alignment, zeroed);
+        }
+        madvise(raw, map_size, MADV_HUGEPAGE);
+    }
+
+    auto* raw_bytes = static_cast<unsigned char*>(raw);
+    auto* header = reinterpret_cast<AllocationHeader*>(raw_bytes);
+    header->magic = kMagic;
+    header->class_index = 0;
+    header->flags = kMmapAllocFlag;
+    header->requested_size = size;
+    header->original = raw;
+    header->mapping_size = map_size;
+    header->reserved = 0;
+
+    void* payload = raw_bytes + payload_offset;
     if (zeroed) {
         std::memset(payload, 0, size);
     }
@@ -239,13 +348,43 @@ extern "C" void hp_free(void* ptr) noexcept {
         return;
     }
 
-    if (header->flags == 1) {
+    if (header->flags == kSmallAllocFlag) {
         std::size_t idx = header->class_index;
         auto& pool = g_pools[idx];
-        std::lock_guard<std::mutex> lock(pool.mu);
+        auto& local_cache = g_thread_caches[idx];
         auto* node = reinterpret_cast<FreeNode*>(header);
-        node->next = pool.free_list;
-        pool.free_list = node;
+
+        node->next = local_cache.free_list;
+        local_cache.free_list = node;
+        ++local_cache.count;
+
+        if (local_cache.count > kLocalCacheLimit) {
+            FreeNode* flush_head = nullptr;
+            FreeNode* flush_tail = nullptr;
+            std::size_t flushed = 0;
+            while (local_cache.free_list && local_cache.count > kLocalBatchSize) {
+                FreeNode* current = local_cache.free_list;
+                local_cache.free_list = current->next;
+                --local_cache.count;
+
+                current->next = flush_head;
+                flush_head = current;
+                if (!flush_tail) {
+                    flush_tail = current;
+                }
+                ++flushed;
+            }
+
+            if (flushed != 0) {
+                std::lock_guard<std::mutex> lock(pool.mu);
+                push_list(pool.free_list, flush_head, flush_tail);
+            }
+        }
+        return;
+    }
+
+    if (header->flags & kMmapAllocFlag) {
+        munmap(header->original, header->mapping_size);
         return;
     }
 
