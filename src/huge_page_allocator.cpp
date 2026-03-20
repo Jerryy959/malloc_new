@@ -57,11 +57,24 @@ struct ThreadCache {
     std::size_t count{0};
 };
 
+void flush_thread_cache(std::size_t idx, ThreadCache& local_cache);
+
+struct ThreadCaches {
+    std::array<ThreadCache, kPayloadClasses.size()> caches{};
+
+    ~ThreadCaches() {
+        for (std::size_t i = 0; i < caches.size(); ++i) {
+            flush_thread_cache(i, caches[i]);
+        }
+    }
+};
+
 std::array<SizeClassPool, kPayloadClasses.size()> g_pools;
-thread_local std::array<ThreadCache, kPayloadClasses.size()> g_thread_caches;
+thread_local ThreadCaches g_thread_caches;
 std::atomic<std::uint64_t> g_hugepage_refill_attempts{0};
 std::atomic<std::uint64_t> g_hugepage_refill_success{0};
 std::atomic<std::uint64_t> g_fallback_refill_success{0};
+std::atomic<std::uint64_t> g_thread_exit_flush_blocks{0};
 
 constexpr std::uint32_t kSmallAllocFlag = 1;
 constexpr std::uint32_t kMmapAllocFlag = 2;
@@ -141,6 +154,29 @@ void push_list(FreeNode*& dst, FreeNode* head, FreeNode* tail) {
     dst = head;
 }
 
+void flush_thread_cache(std::size_t idx, ThreadCache& local_cache) {
+    if (!local_cache.free_list) {
+        local_cache.count = 0;
+        return;
+    }
+
+    auto& pool = g_pools[idx];
+    FreeNode* flush_head = local_cache.free_list;
+    const std::size_t flushed_count = local_cache.count;
+    FreeNode* flush_tail = flush_head;
+    while (flush_tail->next) {
+        flush_tail = flush_tail->next;
+    }
+
+    local_cache.free_list = nullptr;
+    local_cache.count = 0;
+    g_thread_exit_flush_blocks.fetch_add(flushed_count, std::memory_order_relaxed);
+
+    std::lock_guard<std::mutex> lock(pool.mu);
+    initialize_pool(pool, idx);
+    push_list(pool.free_list, flush_head, flush_tail);
+}
+
 void* alloc_small(std::size_t size, std::size_t alignment) {
     std::size_t total = round_up(sizeof(AllocationHeader), alignof(std::max_align_t)) + size;
     total = round_up(total, std::max(alignment, alignof(std::max_align_t)));
@@ -151,7 +187,7 @@ void* alloc_small(std::size_t size, std::size_t alignment) {
     }
 
     auto& pool = g_pools[static_cast<std::size_t>(idx)];
-    auto& local_cache = g_thread_caches[static_cast<std::size_t>(idx)];
+    auto& local_cache = g_thread_caches.caches[static_cast<std::size_t>(idx)];
 
     while (!local_cache.free_list) {
         {
@@ -350,8 +386,7 @@ extern "C" void hp_free(void* ptr) noexcept {
 
     if (header->flags == kSmallAllocFlag) {
         std::size_t idx = header->class_index;
-        auto& pool = g_pools[idx];
-        auto& local_cache = g_thread_caches[idx];
+        auto& local_cache = g_thread_caches.caches[idx];
         auto* node = reinterpret_cast<FreeNode*>(header);
 
         node->next = local_cache.free_list;
@@ -359,25 +394,18 @@ extern "C" void hp_free(void* ptr) noexcept {
         ++local_cache.count;
 
         if (local_cache.count > kLocalCacheLimit) {
-            FreeNode* flush_head = nullptr;
-            FreeNode* flush_tail = nullptr;
-            std::size_t flushed = 0;
-            while (local_cache.free_list && local_cache.count > kLocalBatchSize) {
-                FreeNode* current = local_cache.free_list;
-                local_cache.free_list = current->next;
-                --local_cache.count;
-
-                current->next = flush_head;
-                flush_head = current;
-                if (!flush_tail) {
-                    flush_tail = current;
-                }
-                ++flushed;
+            FreeNode* retained_tail = local_cache.free_list;
+            for (std::size_t i = 1; i < kLocalBatchSize && retained_tail; ++i) {
+                retained_tail = retained_tail->next;
             }
 
-            if (flushed != 0) {
-                std::lock_guard<std::mutex> lock(pool.mu);
-                push_list(pool.free_list, flush_head, flush_tail);
+            if (retained_tail) {
+                ThreadCache flush_cache{};
+                flush_cache.free_list = retained_tail->next;
+                flush_cache.count = local_cache.count - kLocalBatchSize;
+                retained_tail->next = nullptr;
+                local_cache.count = kLocalBatchSize;
+                flush_thread_cache(idx, flush_cache);
             }
         }
         return;
@@ -420,6 +448,10 @@ extern "C" void* hp_realloc(void* ptr, std::size_t size) noexcept {
     return new_ptr;
 }
 
+
+extern "C" std::uint64_t hp_debug_thread_exit_flush_blocks() noexcept {
+    return g_thread_exit_flush_blocks.load(std::memory_order_relaxed);
+}
 
 extern "C" hp_allocator_stats hp_get_allocator_stats() noexcept {
     hp_allocator_stats stats{};
