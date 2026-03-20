@@ -8,6 +8,8 @@
 #include <thread>
 #include <vector>
 
+extern "C" std::uint64_t hp_debug_thread_exit_flush_blocks() noexcept;
+
 namespace {
 
 void test_alignment_matrix() {
@@ -66,6 +68,31 @@ void worker(std::uint32_t seed) {
     }
 }
 
+
+void test_thread_exit_flushes_local_cache() {
+    constexpr std::size_t kAllocCount = 64;
+    constexpr std::size_t kAllocSize = 64;
+
+    const std::uint64_t before = hp_debug_thread_exit_flush_blocks();
+
+    std::thread t([]() {
+        std::vector<void*> worker_ptrs;
+        worker_ptrs.reserve(kAllocCount);
+        for (std::size_t i = 0; i < kAllocCount; ++i) {
+            void* p = hp_malloc(kAllocSize);
+            assert(p != nullptr);
+            worker_ptrs.push_back(p);
+        }
+        for (void* p : worker_ptrs) {
+            hp_free(p);
+        }
+    });
+    t.join();
+
+    const std::uint64_t after = hp_debug_thread_exit_flush_blocks();
+    assert(after >= before + kAllocCount);
+}
+
 void test_multithreaded_stress() {
     constexpr int kThreads = 4;
     std::vector<std::thread> threads;
@@ -83,6 +110,7 @@ void test_multithreaded_stress() {
 int main() {
     test_alignment_matrix();
     test_realloc_growth_and_shrink();
+    test_thread_exit_flushes_local_cache();
     test_multithreaded_stress();
     return 0;
 }
