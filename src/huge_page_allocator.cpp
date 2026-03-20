@@ -7,7 +7,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
-#include <mutex>
 #include <atomic>
 #include <new>
 #include <sys/mman.h>
@@ -46,10 +45,7 @@ struct FreeNode {
 };
 
 struct SizeClassPool {
-    std::mutex mu;
-    FreeNode* free_list{nullptr};
-    std::size_t block_size{0};
-    bool initialized{false};
+    std::atomic<FreeNode*> free_list{nullptr};
 };
 
 struct ThreadCache {
@@ -82,8 +78,10 @@ constexpr std::size_t kLocalBatchSize = 64;
 constexpr std::size_t kLocalCacheLimit = 256;
 
 struct RefillResult {
-    FreeNode* head{nullptr};
-    FreeNode* tail{nullptr};
+    FreeNode* local_head{nullptr};
+    std::size_t local_count{0};
+    FreeNode* shared_head{nullptr};
+    FreeNode* shared_tail{nullptr};
 };
 
 inline std::size_t round_up(std::size_t x, std::size_t align) {
@@ -99,15 +97,49 @@ int class_index_for(std::size_t total) {
     return -1;
 }
 
-void initialize_pool(SizeClassPool& pool, std::size_t class_index) {
-    if (pool.initialized) {
+void push_list_atomic(std::atomic<FreeNode*>& dst, FreeNode* head, FreeNode* tail) {
+    if (!head) {
         return;
     }
-    pool.block_size = kPayloadClasses[class_index];
-    pool.initialized = true;
+
+    FreeNode* observed = dst.load(std::memory_order_relaxed);
+    do {
+        tail->next = observed;
+    } while (!dst.compare_exchange_weak(observed,
+                                        head,
+                                        std::memory_order_release,
+                                        std::memory_order_relaxed));
 }
 
-RefillResult refill_pool(std::size_t block_size) {
+std::size_t pop_batch_atomic(std::atomic<FreeNode*>& src, FreeNode*& out_head, std::size_t max_count) {
+    out_head = nullptr;
+    if (max_count == 0) {
+        return 0;
+    }
+
+    FreeNode* observed = src.load(std::memory_order_acquire);
+    while (observed) {
+        FreeNode* cursor = observed;
+        std::size_t count = 1;
+        while (count < max_count && cursor->next) {
+            cursor = cursor->next;
+            ++count;
+        }
+
+        FreeNode* remainder = cursor->next;
+        if (src.compare_exchange_weak(observed,
+                                      remainder,
+                                      std::memory_order_acquire,
+                                      std::memory_order_relaxed)) {
+            cursor->next = nullptr;
+            out_head = observed;
+            return count;
+        }
+    }
+    return 0;
+}
+
+RefillResult refill_local_cache(std::size_t block_size) {
     g_hugepage_refill_attempts.fetch_add(1, std::memory_order_relaxed);
     void* slab = mmap(nullptr,
                       kHugePageSize,
@@ -132,26 +164,31 @@ RefillResult refill_pool(std::size_t block_size) {
         g_hugepage_refill_success.fetch_add(1, std::memory_order_relaxed);
     }
 
-    std::size_t capacity = kHugePageSize / block_size;
+    const std::size_t capacity = kHugePageSize / block_size;
+    const std::size_t local_target = std::min(capacity, kLocalCacheLimit);
     auto* base = static_cast<unsigned char*>(slab);
+
     RefillResult result{};
+    FreeNode* local_tail = nullptr;
     for (std::size_t i = 0; i < capacity; ++i) {
         auto* node = reinterpret_cast<FreeNode*>(base + i * block_size);
-        node->next = result.head;
-        result.head = node;
-        if (!result.tail) {
-            result.tail = node;
+        if (i < local_target) {
+            node->next = result.local_head;
+            result.local_head = node;
+            if (!local_tail) {
+                local_tail = node;
+            }
+            ++result.local_count;
+            continue;
+        }
+
+        node->next = result.shared_head;
+        result.shared_head = node;
+        if (!result.shared_tail) {
+            result.shared_tail = node;
         }
     }
     return result;
-}
-
-void push_list(FreeNode*& dst, FreeNode* head, FreeNode* tail) {
-    if (!head) {
-        return;
-    }
-    tail->next = dst;
-    dst = head;
 }
 
 void flush_thread_cache(std::size_t idx, ThreadCache& local_cache) {
@@ -160,7 +197,6 @@ void flush_thread_cache(std::size_t idx, ThreadCache& local_cache) {
         return;
     }
 
-    auto& pool = g_pools[idx];
     FreeNode* flush_head = local_cache.free_list;
     const std::size_t flushed_count = local_cache.count;
     FreeNode* flush_tail = flush_head;
@@ -171,10 +207,7 @@ void flush_thread_cache(std::size_t idx, ThreadCache& local_cache) {
     local_cache.free_list = nullptr;
     local_cache.count = 0;
     g_thread_exit_flush_blocks.fetch_add(flushed_count, std::memory_order_relaxed);
-
-    std::lock_guard<std::mutex> lock(pool.mu);
-    initialize_pool(pool, idx);
-    push_list(pool.free_list, flush_head, flush_tail);
+    push_list_atomic(g_pools[idx].free_list, flush_head, flush_tail);
 }
 
 void* alloc_small(std::size_t size, std::size_t alignment) {
@@ -189,31 +222,20 @@ void* alloc_small(std::size_t size, std::size_t alignment) {
     auto& pool = g_pools[static_cast<std::size_t>(idx)];
     auto& local_cache = g_thread_caches.caches[static_cast<std::size_t>(idx)];
 
-    while (!local_cache.free_list) {
-        {
-            std::lock_guard<std::mutex> lock(pool.mu);
-            initialize_pool(pool, static_cast<std::size_t>(idx));
+    if (!local_cache.free_list) {
+        FreeNode* batch = nullptr;
+        local_cache.count = pop_batch_atomic(pool.free_list, batch, kLocalBatchSize);
+        local_cache.free_list = batch;
 
-            for (std::size_t i = 0; i < kLocalBatchSize && pool.free_list; ++i) {
-                FreeNode* node = pool.free_list;
-                pool.free_list = node->next;
-                node->next = local_cache.free_list;
-                local_cache.free_list = node;
-                ++local_cache.count;
+        if (!local_cache.free_list) {
+            RefillResult refill = refill_local_cache(kPayloadClasses[static_cast<std::size_t>(idx)]);
+            if (!refill.local_head) {
+                return nullptr;
             }
+            local_cache.free_list = refill.local_head;
+            local_cache.count = refill.local_count;
+            push_list_atomic(pool.free_list, refill.shared_head, refill.shared_tail);
         }
-
-        if (local_cache.free_list) {
-            break;
-        }
-
-        RefillResult refill = refill_pool(kPayloadClasses[static_cast<std::size_t>(idx)]);
-        if (!refill.head) {
-            return nullptr;
-        }
-
-        std::lock_guard<std::mutex> lock(pool.mu);
-        push_list(pool.free_list, refill.head, refill.tail);
     }
 
     FreeNode* node = local_cache.free_list;
